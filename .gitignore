@@ -1,0 +1,7 @@
+train_annotations.json
+val_annotations.json
+*training_output
+*checkpoints
+*/__pycache__
+
+src/scratchpad.py
