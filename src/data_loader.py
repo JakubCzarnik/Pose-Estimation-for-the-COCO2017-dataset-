@@ -1,30 +1,43 @@
-import cv2
+import cv2, json
 import numpy as np
-import matplotlib.pyplot as plt 
 import tensorflow as tf
-from utils import load_annotations
 from callbacks import *
+import albumentations as A
+
+
+
 
 
 class MetaData:
+   target_image_size = (256, 256)
+   target_maps_size = (64, 64)
+   sigma = 1
+   vec_width = 4
+   n_keypoints = 18 # 17 + 1 (chest-additional)
    pairs = np.array([(0, 1), (0, 2), (1, 3), (2, 4), # head
          (5, 6), (5, 7), (7, 9), (6, 8), (8, 10), # body
          (11, 12), (11, 13), (12, 14), (13, 15), (14, 16), # legs
          (0,17), (11, 17), (12, 17)], dtype=np.int8) # head-body-legs connections
-   n_keypoints = 18 # 17 + 1 (additional)
 
-   def __init__(self, 
-                image, 
-                annotation, 
-                sigma,
-                vec_width,
-                target_image_size=(386, 386), 
-                maps_size=(48, 48)):
+   transform = A.Compose([
+    A.HorizontalFlip(p=0.5),
+    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1),
+    A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.9),
+    A.SmallestMaxSize(max_size=target_image_size[0]),
+    A.RandomCrop(width=target_image_size[1], height=target_image_size[0], p=0.5),
+    A.GaussNoise(var_limit=(10., 50.), p=0.7),
+    A.Blur(blur_limit=1, p=0.7),
+    A.CLAHE(clip_limit=1),
+    A.ImageCompression(quality_lower=75),
+    A.Resize(width=target_image_size[1], height=target_image_size[0])
+   ], keypoint_params=A.KeypointParams(format='xy'))
+
+
+   def __init__(self, image, annotation):
       self.original_width = image.shape[1]
       self.original_height = image.shape[0] 
-      self.annotation = MetaData.preprocess_annotations(annotation, image.shape[:2], maps_size)
-      self.image = cv2.resize(image, target_image_size)/255
-      self.data = MetaData.create_maps(self.annotation, maps_size, sigma, vec_width)
+      self.image, self.annotation = MetaData.preprocess_data(image, annotation)
+      self.data = MetaData.create_maps(self.annotation)
 
 
    def return_data(self):
@@ -32,31 +45,50 @@ class MetaData:
 
 
    @staticmethod
-   def preprocess_annotations(annotation, img_size, target_size):
-      annotation = np.array(annotation["keypoints"], dtype=np.int16)
+   def preprocess_data(image, annotation):
+      annotation = np.array(annotation["keypoints"], dtype=np.int32)
       annotation = annotation.reshape(-1, 17, 3)
 
-      new_annotation = np.zeros((annotation.shape[0], MetaData.n_keypoints, 3), 
-                                dtype=np.int16)
-      for i, _ in enumerate(annotation):
-         new_annotation[i, :17, :3] = annotation[i]
-         left_arm = new_annotation[i, 5, :]
-         right_arm = new_annotation[i, 6, :]
-         # append chest point     
-         new_annotation[i, 17, :] = (left_arm+right_arm)/2
-         new_annotation[i, 17, 2] = 2 if new_annotation[i, 17, 2] > 1 else 0
+      keypoints = np.zeros((annotation.shape[0], MetaData.n_keypoints, 5), 
+                                dtype=np.int32)
+      keypoints[:, :17, :3] = annotation
 
-      mask = new_annotation[..., 2] == 0
-      new_annotation[mask, :2] = [0,0]
-      # resize
-      new_annotation[:, :, 0] = new_annotation[:, :, 0] * target_size[1] / img_size[1]
-      new_annotation[:, :, 1] = new_annotation[:, :, 1] * target_size[0] / img_size[0]
-      return new_annotation
+      # calculate chest point
+      left_arm = keypoints[:, 5, :3]
+      right_arm = keypoints[:, 6, :3]
+      keypoints[:, 17, :3] = (left_arm+right_arm)/2
+      keypoints[:, 17, 2] = np.where(keypoints[:, 17, 2]>1, 2, 0)
+      # append obj and pair index
+      keypoints[:, :, 4] = np.arange(0, keypoints.shape[1])
+      for obj_id in range(keypoints.shape[0]):
+         keypoints[obj_id, :, 3] = obj_id
+
+      # check validity and put (0, 0) on v=0
+      mask = keypoints[..., 2] == 0
+      keypoints[mask, :2] = [0,0]
+
+      # keypoints currently stor x,y,v, obj_idx, and keypoint_idx
+      # beacuse transform will drop invalid points (beyond image and on (0,0))
+      transformed_keypoints = np.zeros((*keypoints.shape[:2], 3), dtype=np.float64)
+      keypoints = keypoints.reshape(-1, 5)
+      transformed = MetaData.transform(image=image, keypoints=keypoints)
+      keypoints = transformed['keypoints']
+      image = transformed['image']
+      for values in keypoints:
+         x, y, v, obj_id, key_id = np.array(values, dtype=np.int32)
+         transformed_keypoints[obj_id, key_id, :] = x, y, v
+      # rescale keypoints to map target size
+      transformed_keypoints[..., 0] *= (MetaData.target_maps_size[1]/MetaData.target_image_size[1])
+      transformed_keypoints[..., 1] *= (MetaData.target_maps_size[0]/MetaData.target_image_size[0])
+ 
+      transformed_keypoints = transformed_keypoints.astype(np.int32)
+      return image, transformed_keypoints
 
 
    @staticmethod
-   def create_maps(annotations, maps_size, sigma, vec_width):
+   def create_maps(annotations):
       pairs =  MetaData.pairs
+      maps_size = MetaData.target_maps_size
       heatmaps = np.zeros((*maps_size, MetaData.n_keypoints), dtype=np.float32)
       pafs = np.zeros((*maps_size, 2*len(pairs)), dtype=np.float32)
       
@@ -65,16 +97,14 @@ class MetaData:
          for i, keypoint in enumerate(keypoints):
             if keypoint[2] > 0:
                heatmaps[:, :, i] = MetaData.create_heatmap(heatmaps[:, :, i],
-                                                           keypoint[:2],
-                                                           sigma)
+                                                           keypoint[:2])
          # Part Affiniti Fields
          for i in range(len(pairs)):
             pair = pairs[i]
             kps = [keypoints[pair[0]], keypoints[pair[1]]]
             if kps[0][2] > 0 and kps[1][2] > 0:
                pafs[:, :, 2*i:2*i+2] = MetaData.create_paf(pafs[:, :, 2*i:2*i+2],
-                                                           kps,
-                                                           vec_width)
+                                                           kps)
       # Clipping
       heatmaps = np.clip(heatmaps, 0, 1)
       pafs = np.clip(pafs, -1, 1)
@@ -82,7 +112,7 @@ class MetaData:
 
 
    @staticmethod
-   def create_heatmap(heatmap, keypoint, sigma):
+   def create_heatmap(heatmap, keypoint):
       size = heatmap.shape
       map = np.zeros(size, dtype=np.float32)
       
@@ -92,7 +122,7 @@ class MetaData:
       
       x_kp, y_kp = keypoint
       d = (xx - x_kp)**2 + (yy - y_kp)**2
-      exponent = d / 2.0 / sigma / sigma
+      exponent = d / 2.0 / MetaData.sigma / MetaData.sigma
       mask = exponent <= 4.6052  # threshold, ln(100)
       map[mask] += np.exp(-exponent[mask])
       map[map > 1.0] = 1.0
@@ -102,7 +132,8 @@ class MetaData:
 
 
    @staticmethod
-   def create_paf(pafs, keypoints, width):
+   def create_paf(pafs, keypoints):
+      vec_width = MetaData.vec_width
       size = pafs.shape[:2]
       map = np.zeros((*size, 2), dtype=np.float32)
 
@@ -119,8 +150,8 @@ class MetaData:
       sample_y = np.linspace(y_start, y_end, num=int(norm), dtype=np.int16)
       
       # create a grid of offsets
-      w_range = np.arange(-width//2, width//2+1, dtype=np.int16)
-      h_range = np.arange(-width//2, width//2+1, dtype=np.int16)
+      w_range = np.arange(-vec_width//2, vec_width//2+1, dtype=np.int16)
+      h_range = np.arange(-vec_width//2, vec_width//2+1, dtype=np.int16)
       offset_grid = np.array(np.meshgrid(w_range, h_range), dtype=np.int16).T.reshape(-1, 2)
 
       # iterate over the line between the keypoints
@@ -138,53 +169,56 @@ class MetaData:
 
 
 
+   
 class DataGenerator(tf.keras.utils.Sequence):
+   batch_size = 16
    def __init__(self, 
                 annotations_path:str, 
                 data_folder:str, 
-                batch_size:int, 
                 batches:int, 
-                shuffle:bool=True,
-                sigma:float=0.8,
-                vec_width:int=3,
-                image_size=(386,386),
-                maps_size=(48,48)):
-      self.annotations = load_annotations(annotations_path)
+                shuffle:bool=True):
+      self.annotations = DataGenerator.load_annotations(annotations_path)
       self.data_folder = data_folder
-      self.batch_size = batch_size
       self.batches = batches
       self.shuffle = shuffle
-      self.sigma = sigma
-      self.vec_width = vec_width
-      self.image_size = image_size
-      self.maps_size = maps_size
 
       self.on_epoch_end(create_indices=True)
 
 
    def __len__(self):
-      return len(self.indices) // self.batch_size
+      return len(self.indices) // DataGenerator.batch_size
+
+
+   @staticmethod
+   def load_annotations(annotations_path="annotations.json"):
+      """Returns train/test annotations from annotations file.
+      """
+      with open(annotations_path) as file:
+         annotations = json.load(file)
+      return annotations
 
 
    def on_epoch_end(self, create_indices=False):
       """Choices new indices from annotations.
-         Notice: this method selecting {num_batches} batches randomly from whole dataset."""
+         Notice: this method selecting {num_batches} batches randomly from whole dataset.
+      """
       if self.shuffle or create_indices:
          data_size = len(self.annotations)
-         samples = int(self.batch_size*self.batches)
+         samples = int(DataGenerator.batch_size*self.batches)
          self.indices = np.random.choice(range(data_size), size=samples, replace=False)
 
 
    def __getitem__(self, index):
-      start_idx = index * self.batch_size
-      end_idx = (index + 1) * self.batch_size
+      start_idx = index * DataGenerator.batch_size
+      end_idx = (index + 1) * DataGenerator.batch_size
       batch_indices = self.indices[start_idx:end_idx]
 
-      X = np.zeros((self.batch_size, *self.image_size, 3), 
+      
+      X = np.zeros((DataGenerator.batch_size, *MetaData.target_image_size, 3), 
                    dtype=np.float32)
-      y_heatmap = np.zeros((self.batch_size, *self.maps_size, MetaData.n_keypoints), 
+      y_heatmap = np.zeros((DataGenerator.batch_size, *MetaData.target_maps_size, MetaData.n_keypoints), 
                            dtype=np.float32) 
-      y_paf = np.zeros((self.batch_size, *self.maps_size, 2*len(MetaData.pairs)), 
+      y_paf = np.zeros((DataGenerator.batch_size, *MetaData.target_maps_size, 2*len(MetaData.pairs)), 
                        dtype=np.float32)
 
       for i, idx in enumerate(batch_indices):
@@ -192,7 +226,7 @@ class DataGenerator(tf.keras.utils.Sequence):
          image = cv2.imread(f"{self.data_folder}{image_name}")
          
          annotation = self.annotations[image_name]
-         metadata = MetaData(image, annotation, self.sigma, self.vec_width)
+         metadata = MetaData(image, annotation)
 
          image, (heatmap, pafs) = metadata.return_data()
          X[i] = image
@@ -204,18 +238,21 @@ class DataGenerator(tf.keras.utils.Sequence):
 
 
 if __name__ == "__main__":
-   np.random.seed(676)
+   #np.random.seed(676)
+   np.random.seed(6777)
    train_gen = DataGenerator("train_annotations.json", 
                           "D:/COCO 2017/train2017/", 
-                          batch_size=16, 
                           batches=350)
 
    import time
+   import matplotlib.pyplot as plt
    t1 = time.time()
    mean = []
    for i, batch in enumerate(train_gen):
       if True: # visualize
          image, (heat, pafs) = batch
+         plt.imshow((image[0]*255).astype(np.uint8))
+         plt.show()
          MapsCompareCallback.compare_maps(image[0], 
                                          heat[0], 
                                          heat[0],

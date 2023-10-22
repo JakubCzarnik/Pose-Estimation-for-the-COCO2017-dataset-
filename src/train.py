@@ -1,6 +1,6 @@
 import tensorflow as tf
 from data_loader import *
-from model import build_model
+from model import *
 from utils import extract_coco
 from callbacks import MapsCompareCallback
 from metrics import ExponentialMSE
@@ -17,12 +17,17 @@ for gpu in gpus:
 
 
 ### Settings ###
-batch_size = 4
-epochs = 150
-lr = 3e-4
+MetaData.target_image_size = (256, 256)
+MetaData.target_maps_size = (64, 64)
+MetaData.sigma = 1
+MetaData.vec_width = 4
 
-num_batches = 500
-val_batches = 10
+DataGenerator.batch_size = 5
+train_batches = 2500
+val_batches = 150
+
+lr = 5e-6
+epochs = 150
 
 load_checkpoint = False
 checkpoint_name = "checkpoints/last"
@@ -34,33 +39,27 @@ val_dataset = "D:/COCO 2017/val2017/"
 ### Preprocess annotations ###
 if not os.path.isfile("train_annotations.json"):
    extract_coco(f"{annotations_folder}instances_train2017.json", save_filename="train_annotations.json")
-
 if not os.path.isfile("val_annotations.json"):
    extract_coco(f"{annotations_folder}instances_val2017.json", save_filename="val_annotations.json")
 
 
-
 train_gen = DataGenerator("train_annotations.json", 
                           train_dataset, 
-                          batch_size=batch_size, 
-                          batches=num_batches)
+                          batches=train_batches)
 val_gen = DataGenerator("val_annotations.json", 
                         val_dataset, 
-                        batch_size=batch_size,
                         batches=val_batches)
 
 
-
-
 if load_checkpoint:
-   model = load_model(f'{checkpoint_name}.h5')
+   model = load_model(f'{checkpoint_name}.h5', custom_objects={"ExponentialMSE": ExponentialMSE})
 else:
    model = build_model(MetaData.n_keypoints, 2*len(MetaData.pairs))
 model.summary()
 
 model.compile(tf.keras.optimizers.Adam(lr), 
-              loss={"conv_81": ExponentialMSE(alpha=4, beta=0.05),
-                    "conv_89": ExponentialMSE(alpha=3, beta=0.05)})
+              loss={"heat_out": ExponentialMSE(alpha=7, beta=0.01),
+                    "paf_out": ExponentialMSE(alpha=6, beta=0.01)})
 
 
 # callbacks

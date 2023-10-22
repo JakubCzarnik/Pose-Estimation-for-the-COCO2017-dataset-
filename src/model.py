@@ -1,91 +1,105 @@
 import tensorflow as tf
-from tensorflow.keras.layers import Input, Conv2D, MaxPool2D, concatenate, Activation, BatchNormalization
-from tensorflow.keras.initializers import GlorotNormal
+from tensorflow.keras.layers import Input, Conv2D, BatchNormalization, MaxPooling2D
+from tensorflow.keras.layers import Concatenate, UpSampling2D, Add, Activation
 
 
-class Conv(Conv2D):
-    def __init__(self, filters, kernel, strides=(1,1), activation='relu', padding="same", use_bn=False, **kwargs):
-        super().__init__(filters, kernel, strides=strides, kernel_initializer=GlorotNormal(), padding=padding, **kwargs)
-        self.activation = Activation(activation)
-        self.use_bn = use_bn
-        if self.use_bn:
-            self.bn = BatchNormalization()
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            "use_bn": self.use_bn,
-            "activation": self.activation,
-        })
-        return config
 
 
-    def call(self, inputs):
-        x = super().call(inputs)
-        if self.use_bn:
-            x = self.bn(x)
-        x = self.activation(x)
-        return x
+def residual_module(inputs, n_filters):
+    merge_input = inputs
+    if inputs.shape[-1] != n_filters:
+        merge_input = Conv2D(n_filters, (1,1), padding='same', activation='relu', kernel_initializer='he_normal')(inputs)
+
+    conv1 = Conv2D(n_filters, (1, 1), padding='same', kernel_initializer='he_normal')(inputs)
+    conv1 = BatchNormalization()(conv1)
+    conv1 = Activation('relu')(conv1)
+
+    conv2 = Conv2D(n_filters, (3, 3), padding='same', kernel_initializer='he_normal')(conv1)
+    conv2 = Activation('relu')(conv2)
+
+    output = Add()([conv2, merge_input])
+    output = Activation('relu')(output)
+    return output
 
 
-def conv_block(inputs, filters, kernel, convs_times=3, use_bn=False):
+def upsample_concat(input_A, input_B):
+    upsample = UpSampling2D((2, 2))(input_A)
+    concat = Concatenate()([upsample, input_B])
+    return concat
+
+
+def build_model(heat_filters, paf_filters, k=32, input_shape=(256, 256, 3)):
+    inputs = Input(shape=input_shape)
+
     x = inputs
-    for _ in range(convs_times):
-        x = Conv(filters, kernel, use_bn=use_bn)(x)
-    return x
+    for _ in range(2):
+        x = residual_module(x, k)
+    x = MaxPooling2D((2, 2))(x)
+
+    for _ in range(4):
+        x = residual_module(x, 2*k)
+   
+    x0 = x
+    x = MaxPooling2D((2, 2))(x)
+    for _ in range(4):
+        x = residual_module(x, 4*k)
+
+    x1 = x 
+    x = MaxPooling2D((2, 2))(x)
+    for _ in range(6):
+        x = residual_module(x, 8*k)
+    
+    x2 = x
+    x = MaxPooling2D((2, 2))(x)
+    for _ in range(7):
+        x = residual_module(x, 8*k)
+    x3 = x
+
+    y1 = residual_module(x1, 4*k) # 1/4
+    y2 = residual_module(x2, 8*k) # 1/8
+    y3 = residual_module(x3, 8*k) # 1/16
+
+    # Concatenate 
+    y21 = upsample_concat(y2, y1) # 1/8 & 1/4
+    y21 = residual_module(y21, 4*k) # 1/4
+
+    y32 = upsample_concat(y3, y2) # 1/16 & 1/8
+    y32 = residual_module(y32, 8*k) # 1/8
+
+    y32_21 = upsample_concat(y32, y21) # 1/8 & 1/4
+    y32_21 = residual_module(y32_21, 8*k) # 1/4
+
+    ### Confidence maps ###
+    heat =  y32_21
+    for i in range(8):
+        if i != 0:
+            heat = BatchNormalization()(heat)
+        heat = Conv2D(4*k, kernel_size=7, padding="Same", kernel_initializer='he_normal')(heat)
+        heat = Activation('relu')(heat)
+
+    heat_0 = heat
+    heat = Conv2D(heat_filters, kernel_size=1, activation="sigmoid", padding="Same", kernel_initializer='he_normal', name="heat_out")(heat)
+    
+
+    ### PAFs ###
+    pafs = upsample_concat(y32, y21) # 1/8 & 1/4
+    pafs = residual_module(pafs, 8*k) # 1/4
+    for i in range(8):
+        if i != 0:
+            pafs = BatchNormalization()(pafs)
+        pafs = Conv2D(4*k, kernel_size=7, padding="Same", kernel_initializer='he_normal')(pafs)
+        pafs = Activation('relu')(pafs)
+
+    pafs = Concatenate()([pafs, heat_0])
+    pafs = Conv2D(paf_filters, kernel_size=1, activation="tanh", padding="Same", kernel_initializer='he_normal', name="paf_out")(pafs)
 
 
-def map_block(inputs, filters, heat_filters, paf_filters, kernel, convs_times=1, use_bn=False):
-    # heatmaps
-    x1 = inputs
-    for _ in range(convs_times):
-        x1 = Conv(filters, kernel, use_bn=use_bn)(x1)
-    x1 = Conv(heat_filters, kernel=1, use_bn=use_bn)(x1)
-    # pafs
-    x2 = inputs
-    for _ in range(convs_times):
-        x2 = Conv(filters, kernel, use_bn=use_bn)(x2)
-    x2 = Conv(paf_filters, kernel=1, use_bn=use_bn)(x2)
-    return x1, x2
-
-
-def build_model(heat_filters, paf_filters):
-    i = Input((386,386,3))
-
-    x = conv_block(i, 64, kernel=3, convs_times=3)
-    x = MaxPool2D((2,2))(x)
-    x = conv_block(x, 80, kernel=3, convs_times=3)
-    x = MaxPool2D((2,2))(x)
-    x = conv_block(x, 96, kernel=3, convs_times=4)
-    x = MaxPool2D((2,2))(x)
-    x = conv_block(x, 128, kernel=3, convs_times=6)
-
-
-    heat1, paf1 = map_block(x, 96, heat_filters, paf_filters, kernel=5, convs_times=4)
-    x = concatenate([x, heat1, paf1])
-
-    heat2, paf2 = map_block(x, 96, heat_filters, paf_filters, kernel=7, convs_times=6)
-    x = concatenate([x, heat2, paf2])
-
-    heat3, paf3 = map_block(x, 96, heat_filters, paf_filters, kernel=7, convs_times=4)
-    x = concatenate([x, heat3, paf3])
-
-    heat4, paf4 = map_block(x, 96, heat_filters, paf_filters, kernel=7, convs_times=6)
-    x = concatenate([x, heat4, paf4])
-
-    heat5, paf5 = map_block(x, 96, heat_filters, paf_filters, kernel=7, convs_times=4)
-    x = concatenate([x, heat5, paf5])
-
-
-    x1 = conv_block(x, 96, kernel=7, convs_times=7)
-    heat = Conv(heat_filters, kernel=1, activation="sigmoid")(x1)
-
-    x2 = conv_block(x, 96, kernel=7, convs_times=7)
-    paf = Conv(paf_filters, kernel=1, activation="tanh")(x2)
-
-    model = tf.keras.models.Model(i, [heat, paf])
+    model = tf.keras.Model(inputs=inputs, outputs=[heat, pafs])
     return model
 
+
 if __name__ == "__main__":
-    model = build_model(18, 34)
-    model.summary()
+    model_hrnet = build_model(18, 34)
+    model_hrnet.summary()
+
+
