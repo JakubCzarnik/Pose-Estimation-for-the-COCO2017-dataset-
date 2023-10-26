@@ -1,12 +1,12 @@
+import os
 import tensorflow as tf
 from data_loader import *
 from model import *
 from utils import extract_coco
 from callbacks import MapsCompareCallback
-from metrics import ExponentialMSE
+from metrics import HeatMSE, PAFMSE
 from tensorflow.keras.callbacks import ModelCheckpoint
 from tensorflow.keras.models import load_model
-import os
 
 gpus = tf.config.list_physical_devices('GPU')
 if len(gpus) == 0:
@@ -19,17 +19,19 @@ for gpu in gpus:
 ### Settings ###
 MetaData.target_image_size = (256, 256)
 MetaData.target_maps_size = (64, 64)
-MetaData.sigma = 1
-MetaData.vec_width = 4
+MetaData.sigma = 0.8    # sigma for heatmaps
+MetaData.vec_width = 4  # width of vector in PAFs
 
-DataGenerator.batch_size = 5
-train_batches = 2500
-val_batches = 150
+
+DataGenerator.batch_size = 4
+train_batches = 1000   # batches per epoch from whole dataset
+val_batches = 1
+
 
 lr = 5e-6
 epochs = 150
 
-load_checkpoint = False
+load_checkpoint = True
 checkpoint_name = "checkpoints/last"
 annotations_folder = "D:/COCO 2017/annotations/"
 train_dataset = "D:/COCO 2017/train2017/"
@@ -52,23 +54,24 @@ val_gen = DataGenerator("val_annotations.json",
 
 
 if load_checkpoint:
-   model = load_model(f'{checkpoint_name}.h5', custom_objects={"ExponentialMSE": ExponentialMSE})
+   model = load_model(f'{checkpoint_name}.h5', custom_objects={"HeatMSE": HeatMSE,
+                                                               "PAFMSE": PAFMSE})
 else:
    model = build_model(MetaData.n_keypoints, 2*len(MetaData.pairs))
 model.summary()
 
 model.compile(tf.keras.optimizers.Adam(lr), 
-              loss={"heat_out": ExponentialMSE(alpha=7, beta=0.01),
-                    "paf_out": ExponentialMSE(alpha=6, beta=0.01)})
+              loss={"heat_out": HeatMSE(alpha=4, beta=0.01, gamma=3),
+                    "paf_out": PAFMSE(alpha=3, beta=0.01, gamma=1)})
 
 
 # callbacks
 mpc = MapsCompareCallback(model, val_gen, folder="training_output/")
 model_checkpoint = ModelCheckpoint(filepath="checkpoints\last.h5", 
-                                 monitor="val_loss",
-                                 save_best_only=True, 
-                                 save_freq='epoch', 
-                                 verbose=1)
+                                    monitor="val_loss",
+                                    save_best_only=False, 
+                                    save_freq='epoch', 
+                                    verbose=1)
 
 model.fit(train_gen,
           validation_data=val_gen,

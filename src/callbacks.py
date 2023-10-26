@@ -27,9 +27,9 @@ class MapsCompareCallback(tf.keras.callbacks.Callback):
    def compare_maps(image, maps_true, maps_pred, filename, aplha=0.6):
       if type(maps_pred) != np.ndarray:
          maps_pred = maps_pred.numpy()
-      c = maps_true.shape[-1]
-      rows = int(c**0.5)
-      cols = c//rows
+      ch = maps_true.shape[-1]
+      rows = int(ch**0.5)
+      cols = ch//rows
 
       traget_size = (image.shape[1], image.shape[0])
       # denormalize
@@ -38,7 +38,7 @@ class MapsCompareCallback(tf.keras.callbacks.Callback):
       if np.min(maps_true) < -0.9:
          maps_true = (maps_true+1)*127.5
          maps_pred = (maps_pred+1)*127.5
-      else:
+      elif np.max(maps_true) < 1.1:
          maps_true = maps_true*255
          maps_pred = maps_pred*255
       # save outputs

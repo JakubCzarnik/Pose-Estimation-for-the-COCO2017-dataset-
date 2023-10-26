@@ -6,42 +6,43 @@ import albumentations as A
 
 
 
-
-
 class MetaData:
    target_image_size = (256, 256)
    target_maps_size = (64, 64)
-   sigma = 1
-   vec_width = 4
+   sigma = 0.9
+   vec_width = 2
    n_keypoints = 18 # 17 + 1 (chest-additional)
-   pairs = np.array([(0, 1), (0, 2), (1, 3), (2, 4), # head
-         (5, 6), (5, 7), (7, 9), (6, 8), (8, 10), # body
-         (11, 12), (11, 13), (12, 14), (13, 15), (14, 16), # legs
-         (0,17), (11, 17), (12, 17)], dtype=np.int8) # head-body-legs connections
+   pairs = np.array([(17,0), # head-body     
+         (0, 1), (0, 2), (1, 3), (2, 4), # head
+         (17, 5),  (17, 6), (5, 7), (7, 9), (6, 8), (8, 10), # body,arms
+         (11, 17), (17, 12), # body-legs
+         (12, 11), (11, 13), (12, 14), (13, 15), (14, 16), # legs
+         ], dtype=np.uint8) # The order is important for connecting 
 
    transform = A.Compose([
     A.HorizontalFlip(p=0.5),
-    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1),
-    A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.9),
+    A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=1),
+    A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.75),
     A.SmallestMaxSize(max_size=target_image_size[0]),
     A.RandomCrop(width=target_image_size[1], height=target_image_size[0], p=0.5),
-    A.GaussNoise(var_limit=(10., 50.), p=0.7),
-    A.Blur(blur_limit=1, p=0.7),
+    A.GaussNoise(var_limit=(10., 50.), p=0.5),
+    A.Blur(blur_limit=3, p=0.3),
     A.CLAHE(clip_limit=1),
     A.ImageCompression(quality_lower=75),
-    A.Resize(width=target_image_size[1], height=target_image_size[0])
-   ], keypoint_params=A.KeypointParams(format='xy'))
+    A.Resize(width=target_image_size[1], height=target_image_size[0]),
+    A.Normalize(mean=(0, 0, 0), std=(1, 1, 1))
+   ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
 
 
    def __init__(self, image, annotation):
       self.original_width = image.shape[1]
-      self.original_height = image.shape[0] 
+      self.original_height = image.shape[0]
       self.image, self.annotation = MetaData.preprocess_data(image, annotation)
-      self.data = MetaData.create_maps(self.annotation)
+      self.maps = MetaData.create_maps(self.annotation)
 
 
    def return_data(self):
-      return self.image, self.data
+      return self.image, self.maps
 
 
    @staticmethod
@@ -49,40 +50,33 @@ class MetaData:
       annotation = np.array(annotation["keypoints"], dtype=np.int32)
       annotation = annotation.reshape(-1, 17, 3)
 
-      keypoints = np.zeros((annotation.shape[0], MetaData.n_keypoints, 5), 
+      keypoints = np.zeros((annotation.shape[0], MetaData.n_keypoints, 3), 
                                 dtype=np.int32)
       keypoints[:, :17, :3] = annotation
 
       # calculate chest point
-      left_arm = keypoints[:, 5, :3]
-      right_arm = keypoints[:, 6, :3]
+      left_arm = keypoints[:, 5, :3] # x,y,v
+      right_arm = keypoints[:, 6, :3] # x,y,v
       keypoints[:, 17, :3] = (left_arm+right_arm)/2
       keypoints[:, 17, 2] = np.where(keypoints[:, 17, 2]>1, 2, 0)
-      # append obj and pair index
-      keypoints[:, :, 4] = np.arange(0, keypoints.shape[1])
-      for obj_id in range(keypoints.shape[0]):
-         keypoints[obj_id, :, 3] = obj_id
-
+  
       # check validity and put (0, 0) on v=0
       mask = keypoints[..., 2] == 0
       keypoints[mask, :2] = [0,0]
 
-      # keypoints currently stor x,y,v, obj_idx, and keypoint_idx
-      # beacuse transform will drop invalid points (beyond image and on (0,0))
-      transformed_keypoints = np.zeros((*keypoints.shape[:2], 3), dtype=np.float64)
-      keypoints = keypoints.reshape(-1, 5)
+      # transform
+      keypoints = keypoints.reshape(-1, 3)
       transformed = MetaData.transform(image=image, keypoints=keypoints)
       keypoints = transformed['keypoints']
       image = transformed['image']
-      for values in keypoints:
-         x, y, v, obj_id, key_id = np.array(values, dtype=np.int32)
-         transformed_keypoints[obj_id, key_id, :] = x, y, v
+      keypoints = np.array(keypoints, dtype=np.float64).reshape(-1, MetaData.n_keypoints, 3)
+      
       # rescale keypoints to map target size
-      transformed_keypoints[..., 0] *= (MetaData.target_maps_size[1]/MetaData.target_image_size[1])
-      transformed_keypoints[..., 1] *= (MetaData.target_maps_size[0]/MetaData.target_image_size[0])
+      keypoints[..., 0] *= (MetaData.target_maps_size[1]/MetaData.target_image_size[1])
+      keypoints[..., 1] *= (MetaData.target_maps_size[0]/MetaData.target_image_size[0])
  
-      transformed_keypoints = transformed_keypoints.astype(np.int32)
-      return image, transformed_keypoints
+      keypoints = keypoints.astype(np.int32)
+      return image, keypoints
 
 
    @staticmethod
@@ -123,9 +117,10 @@ class MetaData:
       x_kp, y_kp = keypoint
       d = (xx - x_kp)**2 + (yy - y_kp)**2
       exponent = d / 2.0 / MetaData.sigma / MetaData.sigma
-      mask = exponent <= 4.6052  # threshold, ln(100)
+      threshold = 4.6052  # ln(100)
+      mask = exponent <= threshold  
+      exponent = np.clip(exponent, 0, threshold)
       map[mask] += np.exp(-exponent[mask])
-      map[map > 1.0] = 1.0
       
       heatmap += map
       return heatmap
@@ -133,40 +128,41 @@ class MetaData:
 
    @staticmethod
    def create_paf(pafs, keypoints):
-      vec_width = MetaData.vec_width
       size = pafs.shape[:2]
-      map = np.zeros((*size, 2), dtype=np.float32)
+      width = MetaData.vec_width
+      map = np.zeros((*size, 2))
+      x1, y1, _ = keypoints[0]
+      x2, y2, _ = keypoints[1]
+      dx = x2 - x1
+      dy = y2 - y1
 
-      x_start, y_start = keypoints[0][:2]
-      x_end, y_end = keypoints[1][:2]
+      norm = np.sqrt(dx**2 + dy**2)+1e-5
+      vec_x = dx / norm
+      vec_y = dy / norm
 
-      dx = x_end - x_start
-      dy = y_end - y_start
-      norm = np.sqrt(dx**2 + dy**2)
-      dx /= (norm + 1e-5)  
-      dy /= (norm + 1e-5) 
+      if x1 != x2:
+         # y = ax + b
+         a = (y1-y2)/(x1-x2) 
+         b = y1 - a*x1
+         x_cords = np.linspace(x1, x2, num=90, dtype=np.float32)
+         y_cords = x_cords*a + b
+         for x, y in zip(x_cords, y_cords):
+            w_range = np.arange(-width//2, width//2+1)
+            h_range = np.arange(-width//2, width//2+1)
+            w_coords = np.clip(x + w_range, 0, map.shape[1]-1).astype(np.int16)
+            h_coords = np.clip(y + h_range, 0, map.shape[0]-1).astype(np.int16)
+            map[h_coords[:, None], w_coords] = vec_x, vec_y
 
-      sample_x = np.linspace(x_start, x_end, num=int(norm), dtype=np.int16)
-      sample_y = np.linspace(y_start, y_end, num=int(norm), dtype=np.int16)
-      
-      # create a grid of offsets
-      w_range = np.arange(-vec_width//2, vec_width//2+1, dtype=np.int16)
-      h_range = np.arange(-vec_width//2, vec_width//2+1, dtype=np.int16)
-      offset_grid = np.array(np.meshgrid(w_range, h_range), dtype=np.int16).T.reshape(-1, 2)
-
-      # iterate over the line between the keypoints
-      for j in range(int(norm)):
-         paf_x = sample_x[j]
-         paf_y = sample_y[j]
-         if 0 <= paf_x < size[1] and 0 <= paf_y < size[0]:
-               coords = np.array([paf_x, paf_y], dtype=np.int16) + offset_grid
-               valid_coords_mask = np.all((coords >= 0) & (coords < size), axis=1)
-               valid_coords = coords[valid_coords_mask]
-               map[valid_coords[:, 1], valid_coords[:, 0], :] = [dx, dy]
-
+      else:
+         y_cords = np.linspace(y1, y2, num=90, dtype=np.float32)
+         y_cords = np.clip(y_cords, 0, map.shape[0]-1)
+         for y in y_cords:
+            w_range = np.arange(-width//2, width//2+1)
+            w_coords = np.clip(x1 + w_range, 0, map.shape[1]-1).astype(np.int16)
+            map[np.int16(y), w_coords, 1] = vec_y
+         
       pafs += map
       return pafs
-
 
 
    
@@ -238,11 +234,11 @@ class DataGenerator(tf.keras.utils.Sequence):
 
 
 if __name__ == "__main__":
-   #np.random.seed(676)
-   np.random.seed(6777)
+   np.random.seed(676)
+   #np.random.seed(6777)
    train_gen = DataGenerator("train_annotations.json", 
-                          "D:/COCO 2017/train2017/", 
-                          batches=350)
+                             "D:/COCO 2017/train2017/", 
+                              batches=350)
 
    import time
    import matplotlib.pyplot as plt
@@ -251,15 +247,16 @@ if __name__ == "__main__":
    for i, batch in enumerate(train_gen):
       if True: # visualize
          image, (heat, pafs) = batch
-         plt.imshow((image[0]*255).astype(np.uint8))
+         image, heat, pafs = image[0], heat[0], pafs[0]
+         plt.imshow((image*255).astype(np.uint8))
          plt.show()
-         MapsCompareCallback.compare_maps(image[0], 
-                                         heat[0], 
-                                         heat[0],
+         MapsCompareCallback.compare_maps(image, 
+                                         heat, 
+                                         heat,
                                          "heat")
-         MapsCompareCallback.compare_maps(image[0], 
-                                         pafs[0], 
-                                         pafs[0],
+         MapsCompareCallback.compare_maps(image, 
+                                         pafs, 
+                                         pafs,
                                          "pafs")
          break
       else: # timeit
