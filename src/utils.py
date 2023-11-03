@@ -1,5 +1,6 @@
-import ijson, json
+import ijson, json, os
 import numpy as np
+import tensorflow as tf
 from skimage.feature import peak_local_max
 from data_loader import MetaData
 
@@ -18,6 +19,13 @@ class MapsParser:
 
       self.keypoints = MapsParser.parse_heatmaps(heatmaps)
       self.connections = MapsParser.parse_pafs(self.keypoints, self.pafs)
+
+   @classmethod
+   def update(cls, config):
+      cls.maxima_filter_size = config.maxima_filter_size
+      cls.heatmaps_threshold = config.heatmaps_threshold
+      cls.pafs_threshold = config.pafs_threshold
+      cls.conections_threshold = config.conections_threshold
 
 
    @staticmethod
@@ -99,7 +107,7 @@ class MapsParser:
       """This method selects the best connections from all possible connections by minimizing
          the sum of distances. Additionally, it returns connections merged by objects in an array of shape:
          (n_objects, n_keypoints, 3)."""
-      def get_best_path(list_points, actual_seq, depth=0):
+      def get_best_sequence(list_points, actual_seq, depth=0):
          min_distance = float("inf")
          best_seq = None
          for connection in list_points[0]:
@@ -111,7 +119,7 @@ class MapsParser:
             # if we are not at the end of sequence, we keep going
             distance = None
             if len(list_points) > 1:
-               path, distance = get_best_path(list_points[1:], path, depth+1)
+               path, distance = get_best_sequence(list_points[1:], path, depth+1)
 
             # at the end we calculating sum of distances
             if distance is None:
@@ -142,7 +150,7 @@ class MapsParser:
                extracted_connections.append(cont)
 
          starting_sequence = np.zeros((len(extracted_connections), 2, 3), dtype=np.int32)
-         output = get_best_path(extracted_connections, starting_sequence)
+         output = get_best_sequence(extracted_connections, starting_sequence)
          best_connections[pair_id, :output.shape[0]] = output
    
       # 2. Merge connections for each person
@@ -187,7 +195,6 @@ class MapsParser:
 
 
 
-
 def extract_coco(filename, save_filename):
    """Extracts the most important information from COCO annotations and saves it to a JSON file. 
       >>> {"image_name.jpg": {"keypoints": list, "width": int, "height": int}}
@@ -219,6 +226,22 @@ def extract_coco(filename, save_filename):
 
    with open(f"{save_filename}", 'w') as f:
       json.dump(annotations, f)
+
+
+def set_memory_growth():
+   gpus = tf.config.list_physical_devices('GPU')
+   if len(gpus) == 0:
+      raise SystemError
+   for gpu in gpus:
+      print(gpu) 
+      tf.config.experimental.set_memory_growth(gpu, True)
+
+
+def preprocess_annotations(config):
+   if not os.path.isfile(config.extracted_train_annotations):
+      extract_coco(config.train_annotations, save_filename=config.extracted_train_annotations)
+   if not os.path.isfile(config.extracted_val_annotations):
+      extract_coco(config.val_annotations, save_filename=config.extracted_val_annotations)
 
 
 

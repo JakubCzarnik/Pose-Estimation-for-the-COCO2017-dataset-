@@ -4,34 +4,30 @@ import tensorflow as tf
 from callbacks import *
 import albumentations as A
 
-
-
 class MetaData:
-   target_image_size = (256, 256)
-   target_maps_size = (64, 64)
+   target_image_size = (224, 224)
+   target_maps_size = (56, 56)
    sigma = 0.9
    vec_width = 2
-   n_keypoints = 18 # 17 + 1 (chest-additional)
-   pairs = np.array([(17,0), # head-body     
-         (0, 1), (0, 2), (1, 3), (2, 4), # head
-         (17, 5),  (17, 6), (5, 7), (7, 9), (6, 8), (8, 10), # body,arms
-         (11, 17), (17, 12), # body-legs
-         (12, 11), (11, 13), (12, 14), (13, 15), (14, 16), # legs
-         ], dtype=np.uint8) # The order is important for connecting 
-
+   n_keypoints = 18
+   pairs = np.array([(17,0),
+         (0, 1), (0, 2), (1, 3), (2, 4),
+         (17, 5),  (17, 6), (5, 7), (7, 9), (6, 8), (8, 10),
+         (11, 17), (17, 12),
+         (12, 11), (11, 13), (12, 14), (13, 15), (14, 16),
+         ], dtype=np.uint8)
    transform = A.Compose([
-    A.HorizontalFlip(p=0.5),
-    A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=1),
-    A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.75),
-    A.SmallestMaxSize(max_size=target_image_size[0]),
-    A.RandomCrop(width=target_image_size[1], height=target_image_size[0], p=0.5),
-    A.GaussNoise(var_limit=(10., 50.), p=0.5),
-    A.Blur(blur_limit=3, p=0.3),
-    A.CLAHE(clip_limit=1),
-    A.ImageCompression(quality_lower=75),
-    A.Resize(width=target_image_size[1], height=target_image_size[0]),
-    A.Normalize(mean=(0, 0, 0), std=(1, 1, 1))
-   ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
+         A.HorizontalFlip(p=0.5),
+         A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=1),
+         A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.75),
+         A.SmallestMaxSize(max_size=target_image_size[0]),
+         A.RandomCrop(width=target_image_size[1], height=target_image_size[0], p=0.5),
+         A.GaussNoise(var_limit=(10., 50.), p=0.5),
+         A.Blur(blur_limit=3, p=0.3),
+         A.CLAHE(clip_limit=1),
+         A.ImageCompression(quality_lower=75),
+         A.Resize(width=target_image_size[1], height=target_image_size[0])
+         ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
 
 
    def __init__(self, image, annotation):
@@ -41,8 +37,30 @@ class MetaData:
       self.maps = MetaData.create_maps(self.annotation)
 
 
+   @classmethod
+   def update(cls, config):
+      cls.target_image_size = config.target_image_size
+      cls.target_maps_size = config.target_maps_size
+      cls.sigma = config.sigma
+      cls.vec_width = config.vector_width
+      cls.n_keypoints = config.n_keypoints
+      cls.pairs = np.array(config.pairs, dtype=np.uint8)
+      cls.transform = A.Compose([
+         A.HorizontalFlip(p=0.5),
+         A.RandomBrightnessContrast(brightness_limit=0.15, contrast_limit=0.15, p=1),
+         A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=15, p=0.75),
+         A.SmallestMaxSize(max_size=config.target_image_size[0]),
+         A.RandomCrop(width=config.target_image_size[1], height=config.target_image_size[0], p=0.5),
+         A.GaussNoise(var_limit=(10., 50.), p=0.5),
+         A.Blur(blur_limit=3, p=0.3),
+         A.CLAHE(clip_limit=1),
+         A.ImageCompression(quality_lower=75),
+         A.Resize(width=config.target_image_size[1], height=config.target_image_size[0])
+         ], keypoint_params=A.KeypointParams(format='xy', remove_invisible=False))
+
+
    def return_data(self):
-      return self.image, self.maps
+      return self.image/127.5-1, self.maps
 
 
    @staticmethod
@@ -185,6 +203,11 @@ class DataGenerator(tf.keras.utils.Sequence):
       return len(self.indices) // DataGenerator.batch_size
 
 
+   @classmethod
+   def update(cls, config):
+      cls.batch_size = config.batch_size
+
+
    @staticmethod
    def load_annotations(annotations_path="annotations.json"):
       """Returns train/test annotations from annotations file.
@@ -233,6 +256,16 @@ class DataGenerator(tf.keras.utils.Sequence):
 
 
 
+def create_generators(config):
+   train_gen = DataGenerator(config.extracted_train_annotations, 
+                          config.train_images, 
+                          batches=config.train_batches_per_epoch)
+   val_gen = DataGenerator(config.extracted_val_annotations, 
+                           config.val_images, 
+                           batches=config.val_batches_per_epoch)
+   return train_gen, val_gen
+
+
 if __name__ == "__main__":
    np.random.seed(676)
    #np.random.seed(6777)
@@ -248,7 +281,7 @@ if __name__ == "__main__":
       if True: # visualize
          image, (heat, pafs) = batch
          image, heat, pafs = image[0], heat[0], pafs[0]
-         plt.imshow((image*255).astype(np.uint8))
+         plt.imshow(((image+1)*127.5).astype(np.uint8))
          plt.show()
          MapsCompareCallback.compare_maps(image, 
                                          heat, 

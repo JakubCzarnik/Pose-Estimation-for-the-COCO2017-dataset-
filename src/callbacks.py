@@ -33,8 +33,7 @@ class MapsCompareCallback(tf.keras.callbacks.Callback):
 
       traget_size = (image.shape[1], image.shape[0])
       # denormalize
-      if np.max(image) < 1.1:
-         image = image*255
+      image = (image+1)*127.5
       if np.min(maps_true) < -0.9:
          maps_true = (maps_true+1)*127.5
          maps_pred = (maps_pred+1)*127.5
