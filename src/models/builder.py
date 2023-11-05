@@ -26,15 +26,15 @@ class ModelConstructor:
       return x
 
 
-   def split(self, inputs, n_convs, filters1, kernel1, filters2, kernel2, heat_filters, paf_filters, last=False):
+   def split(self, inputs, n_convs, filters1, kernel1, filters2, kernel2, heat_filters, paf_filters, stage_id=None):
       x = inputs ### heat
       for _ in range(n_convs):
          x = self.conv(x, filters1, kernel1, kernel_regularizer=l2(self._l2))
       x = self.conv(x, filters2, kernel2)
 
-      if last:
+      if stage_id:
          heat = self.conv(x, heat_filters, kernel_size=1, activation="sigmoid", bn=False,
-                          name="heat_out", kernel_regularizer=l2(self._l2))
+                          name=f"heat_{stage_id}", kernel_regularizer=l2(self._l2))
       else:
          heat = self.conv(x, heat_filters, (1,1), act=False, bn=False)
       
@@ -43,9 +43,9 @@ class ModelConstructor:
          x = self.conv(x, filters1, kernel1)
       x = self.conv(x, filters2, kernel2, kernel_regularizer=l1(self._l1))
 
-      if last:
+      if stage_id:
          paf = self.conv(x, paf_filters, kernel_size=1, activation="tanh", bn=False,
-                          name="paf_out", kernel_regularizer=l1(self._l1))
+                          name=f"paf_{stage_id}", kernel_regularizer=l1(self._l1))
       else:
          paf = self.conv(x, paf_filters, (1,1), act=False, bn=False)
       return heat, paf

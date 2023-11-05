@@ -1,6 +1,6 @@
 import tensorflow as tf
-from tensorflow.keras.regularizers import l1, l2
-from tensorflow.keras.layers import Input, Concatenate, Conv2D
+from tensorflow.keras.regularizers import l2
+from tensorflow.keras.layers import Input, Concatenate
 from keras_efficientnet_v2 import EfficientNetV2B0
 from models.builder import ModelConstructor
 
@@ -8,6 +8,7 @@ from models.builder import ModelConstructor
 class EfficientNet(ModelConstructor):
    def __init__(self, config):
       super().__init__(config)
+
 
    def get_base_model(self):
       base_model = EfficientNetV2B0(input_shape=self.input_shape)
@@ -39,15 +40,18 @@ class EfficientNet(ModelConstructor):
       y0 = base_model(i)
 
 
-      heat0, paf0 = self.split(y0, 5, 128, (7,7), 128, (1,1), self.heat_filters, self.paf_filters)
-      heat0 = self.spatial_attention(heat0, 64, self.heat_filters, kernel_size=(7,7))
-      paf0 = self.spatial_attention(paf0, 64, self.paf_filters, kernel_size=(7,7))
-
+      heat0, paf0 = self.split(y0, 5, 128, (7,7), 128, (1,1), self.heat_filters, self.paf_filters, stage_id="0")
 
       y1 = Concatenate()([paf0, heat0, y0])
-      heat1, paf1 = self.split(y1, 5, 128, (7,7), 128, (1,1), self.heat_filters, self.paf_filters, last=True)
+      heat1, paf1 = self.split(y1, 5, 128, (7,7), 128, (1,1), self.heat_filters, self.paf_filters, stage_id="1")
 
-      model = tf.keras.models.Model(inputs=i, outputs=[heat1, paf1])
+      y2 = Concatenate()([paf1, heat1, y0])
+      heat2, paf2 = self.split(y2, 5, 128, (7,7), 128, (1,1), self.heat_filters, self.paf_filters, stage_id="2")
+
+      heatmaps = [heat0, heat1, heat2]
+      pafs = [paf0, paf1, paf2]
+
+      model = tf.keras.models.Model(inputs=i, outputs=[heatmaps, pafs])
       return model
 
 
@@ -60,7 +64,7 @@ if __name__ == "__main__":
 
    cfg = Config()
 
-   model = EfficientNet(cfg).build_model()
+   model, hmaps, pafs = EfficientNet(cfg).build_model()
    model.summary()
 
 

@@ -13,13 +13,17 @@ class MapsCompareCallback(tf.keras.callbacks.Callback):
       idx = np.random.randint(0, len(self.generator), size=1)[0]
       images, (heatmaps_true, pafs_true) = self.generator[idx]
       heatmaps_pred, pafs_pred = self.model(images)
+
+      # take first batch, then last layer
+      pafs_pred = pafs_pred[0]
+      heatmaps_pred = heatmaps_pred[0]
       MapsCompareCallback.compare_maps(images[0], 
                                          heatmaps_true[0], 
-                                         heatmaps_pred[0],
+                                         heatmaps_pred,
                                          filename=f"{self.folder}{epoch}_heatmaps")
       MapsCompareCallback.compare_maps(images[0], 
                                          pafs_true[0], 
-                                         pafs_pred[0],
+                                         pafs_pred,
                                          filename=f"{self.folder}{epoch}_pafs")
 
 
@@ -56,8 +60,117 @@ class MapsCompareCallback(tf.keras.callbacks.Callback):
 
 
 
+class Checkpoint(tf.keras.callbacks.Callback):
+   def __init__(self, ckpt_manager, monitor="val_loss", save_best_only=False, verbose=1):
+      super().__init__()
+      self.manager = ckpt_manager
+      
+      self.monitor = monitor
+      self.monitor_value = float("inf")
+      self.save_best_only = save_best_only
+
+      self.verbose = verbose
+
+
+   def on_epoch_end(self, _, logs=None):
+      current_val_loss = logs.get(self.monitor)
+
+      if self.save_best_only:
+         if current_val_loss < self.monitor_value:
+            if self.verbose:
+               print(f"{self.monitor} improved from {self.monitor_value} to {current_val_loss}. Saving...")
+
+            self.manager.save()  
+            self.monitor_value = current_val_loss
+         elif self.verbose:
+            print(f"{self.monitor} didn't improved from {self.monitor_value}. Saving...")
+      else:
+         print("Saving model...")
+         self.manager.save()  
 
 
 
+class TensorBoard(tf.keras.callbacks.Callback):
+   def __init__(self, log_dir, **kwargs):
+      super().__init__(**kwargs)
+      self.log_dir = log_dir
+      self.file_writer = tf.summary.create_file_writer(self.log_dir)
 
 
+   def on_train_batch_end(self, _, logs=None):
+      logs = logs or {}
+      for name, value in logs.items():
+         if name in ["batch", "size", "evaluation_loss_vs_iterations"]:
+            continue
+         name = f"Steps/{name}"
+         with self.file_writer.as_default():
+            tf.summary.scalar(name, value, step=self.model.optimizer.iterations)
+      self.file_writer.flush()
+
+
+   def on_epoch_end(self, epoch, logs=None):
+      logs = logs or {}
+      for name, value in logs.items():
+         if name in ["batch", "size", "evaluation_loss_vs_iterations"]:
+            continue
+         name = f"Epochs/{name}"
+         with self.file_writer.as_default():
+            tf.summary.scalar(name, value, step=epoch)
+      self.file_writer.flush()
+
+
+
+class ProgressBar(tf.keras.callbacks.Callback):
+   def __init__(self, metrics):
+      super().__init__()
+      self.metrics = metrics
+      self.progbar = None
+
+   def on_epoch_begin(self, epoch, logs=None):
+      print(f"Epoch {epoch+1}/{self.epochs}")
+      self.averages = {metric: 0 for metric in self.metrics if not metric.startswith("val")}
+      self.current_epoch = epoch
+      self.progbar = tf.keras.utils.Progbar(target=self.steps, stateful_metrics=self.metrics)
+
+
+   def on_train_begin(self, logs=None):
+      self.epochs = self.params["epochs"]
+      self.steps = self.params['steps']
+
+
+   def on_train_batch_end(self, batch, logs=None):
+      alpha = 1/(batch+1) if batch !=0 else 1
+
+      values = [(k, v) for k, v in logs.items() if k in self.metrics]
+      # calculate moving averange
+      for k, v in values:
+         self.averages[k] = (1-alpha)*self.averages[k] +  alpha*v
+
+      averages = [(k, v) for k, v in self.averages.items()]
+      self.progbar.update(batch, values=averages)
+
+
+   def on_epoch_end(self, _, logs=None):
+      metrics = [(k, v) for k, v in self.averages.items()]
+
+      self.progbar.update(self.steps, values=metrics, finalize=False)
+
+
+   def on_test_begin(self, logs=None):
+      val_metrics = {metric: 0 for metric in self.metrics if metric.startswith("val")}
+      self.averages.update(val_metrics)
+
+
+   def on_test_batch_end(self, batch, logs=None):
+      alpha = 1/(batch+1) if batch !=0 else 1
+
+      values = [(k, v) for k, v in logs.items() if k in self.metrics]
+
+      for k, v in values:
+         self.averages[k] = (1-alpha)*self.averages[k] + alpha*v
+
+
+   def on_test_end(self, logs=None):
+      metrics = [(k, v) for k, v in self.averages.items()]
+
+      self.progbar.update(self.steps, values=metrics, finalize=True)
